@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "flipkart-mcp": {
+      "command": "python",
+      "args": ["-m", "server"],
+      "env": {
+        "PYTHONPATH": "."
+      }
+    }
+  }
+}
