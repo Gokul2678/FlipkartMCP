@@ -227,27 +227,72 @@ def extract_product_data(html_content: str, url: str) -> dict:
 
 
 def extract_search_results(html_content: str, max_results: int) -> list:
-    """Extract search results from Flipkart search page"""
+    """
+    Extract search results from Flipkart search page using robust structure-based parsing.
+
+    Strategy: Instead of relying on fragile CSS classes, we use:
+    1. Product link patterns (most reliable - URL structure rarely changes)
+    2. Price patterns (₹ symbol is stable)
+    3. Structural relationships (links contain images + text)
+    4. Multiple fallback strategies
+    """
     soup = BeautifulSoup(html_content, 'html.parser')
     products = []
 
-    # Find product containers - UPDATED FOR 2025 STRUCTURE
-    # Try new structure first (2025), then fall back to old selectors
-    product_selectors = [
-        'div.jIjQ8S',            # NEW: 2025 product card container
-        'div._1AtVbE',           # OLD: Product card container
-        'div._2kHMtA',           # OLD: Alternative product container
-        'div.cPHDOP',            # OLD: Another container pattern
-        'a._1fQZEK',             # OLD: Product link container
-    ]
+    # STRATEGY 1: Find product links by URL pattern (most reliable)
+    # Flipkart product URLs follow pattern: /product-name/p/productId or /product-name-pid-xxx.html
+    all_links = soup.find_all('a', href=True)
+    product_links = []
 
-    product_elements = []
-    for selector in product_selectors:
-        product_elements = soup.select(selector)
-        if product_elements:
-            break
+    for link in all_links:
+        href = link.get('href', '')
+        # Match Flipkart product URL patterns - be more permissive
+        # Product URLs typically have: /p/itm, /p/ followed by alphanumeric, or ?pid= parameter
+        if (('/p/itm' in href or
+             '/p/products' in href or
+             '?pid=' in href or
+             re.search(r'/p/[a-zA-Z0-9]+', href)) and
+            not any(skip in href for skip in ['/search', '/compare', '/help', '/account', '/pr?sid'])):
+            product_links.append(link)
 
-    for idx, product in enumerate(product_elements[:max_results]):
+    # Remove duplicates based on href
+    seen_urls = set()
+    unique_product_links = []
+    for link in product_links:
+        url = link.get('href')
+        if url not in seen_urls:
+            seen_urls.add(url)
+            unique_product_links.append(link)
+
+    # STRATEGY 2: If no product links found, try finding containers with prices (₹ symbol)
+    if not unique_product_links:
+        # Find all elements containing rupee symbol
+        price_elements = soup.find_all(string=re.compile(r'₹'))
+        containers = set()
+        for price_elem in price_elements:
+            # Find parent containers that likely hold product info
+            parent = price_elem.find_parent(['div', 'a'])
+            if parent:
+                # Look for a higher-level container (3-5 levels up)
+                for _ in range(5):
+                    if parent.parent:
+                        parent = parent.parent
+                    else:
+                        break
+                containers.add(parent)
+
+        # Convert containers back to list and look for links within
+        for container in list(containers)[:max_results * 3]:  # Search extra to filter later
+            links = container.find_all('a', href=True)
+            for link in links:
+                href = link.get('href', '')
+                if '/p/' in href or 'itm' in href:
+                    if href not in seen_urls:
+                        seen_urls.add(href)
+                        unique_product_links.append(link)
+
+    # Process product links and extract information
+    for link in unique_product_links[:max_results]:
         try:
             product_info = {
                 'name': 'Name not found',
@@ -257,61 +302,102 @@ def extract_search_results(html_content: str, max_results: int) -> list:
                 'url': 'URL not found'
             }
 
-            # Extract product name - NEW structure uses a.k7wcnx
-            name_elem = product.select_one('a.k7wcnx, a.IRpwTa, a.s1Q9rs, div.IRpwTa, div._4rR01T')
-            if name_elem:
-                name_text = name_elem.get_text().strip()
-                # Remove "Add to Compare" prefix if present
-                name_text = name_text.replace('Add to Compare', '').strip()
-                product_info['name'] = name_text
+            # Extract URL first (we already have it)
+            href = link.get('href', '')
+            if href.startswith('/'):
+                product_info['url'] = f"https://www.flipkart.com{href}"
+            elif href.startswith('http'):
+                product_info['url'] = href
+            else:
+                continue  # Skip if no valid URL
 
-            # Extract price - NEW structure uses div.hZ3P6w.DeU9vF or div.hZ3P6w
-            price_elem = product.select_one('div.hZ3P6w.DeU9vF, div.hZ3P6w, div._30jeq3, div.Nx9bqj, div._1_WHN1')
-            if price_elem:
-                product_info['price'] = clean_price(price_elem.get_text())
+            # Find the product container (parent of the link)
+            # Go up the tree to find a container that has price/image/rating
+            container = link
+            for _ in range(10):  # Search up to 10 levels
+                container = container.parent
+                if not container:
+                    container = link
+                    break
+                # Check if this container has price info
+                if container.find(string=re.compile(r'₹')):
+                    break
 
-            # Extract image - NEW structure uses img.UCc1lI
-            img_elem = product.select_one('img.UCc1lI, img')
-            if img_elem and img_elem.get('src'):
-                img_src = img_elem.get('src')
-                # Skip placeholder/loading images
+            # Extract product name - multiple strategies
+            name_found = False
+
+            # Strategy 1: Try finding name in link text or child divs/spans
+            for elem in [link] + link.find_all(['div', 'span', 'a'], recursive=False)[:5]:
+                name_text = elem.get_text(strip=True)
+                if name_text and len(name_text) > 5 and len(name_text) < 250:
+                    # Clean up the name
+                    name_text = name_text.replace('Add to Compare', '').strip()
+                    name_text = re.sub(r'\s+', ' ', name_text)  # Normalize whitespace
+                    # Avoid price-like text
+                    if '₹' not in name_text and not name_text.replace('.', '').replace(',', '').isdigit():
+                        product_info['name'] = name_text[:200]
+                        name_found = True
+                        break
+
+            # Strategy 2: Look in container if link text was too short
+            if not name_found or len(product_info['name']) < 10:
+                # Find all text elements in container, prioritize longer ones
+                text_candidates = []
+                for elem in container.find_all(['div', 'span', 'a']):
+                    text = elem.get_text(strip=True)
+                    if (10 < len(text) < 250 and
+                        '₹' not in text and
+                        not text.replace('.', '').replace(',', '').isdigit() and
+                        'Add to Compare' not in text):
+                        text_candidates.append(text)
+
+                # Sort by length (longer product names are usually more complete)
+                text_candidates.sort(key=len, reverse=True)
+                if text_candidates:
+                    product_info['name'] = text_candidates[0][:200]
+                    name_found = True
+
+            # Extract price using ₹ symbol (very reliable)
+            price_text = container.find(string=re.compile(r'₹[\d,]+'))
+            if price_text:
+                product_info['price'] = clean_price(price_text)
+            else:
+                # Try finding in any element with price-like text
+                for elem in container.find_all(['div', 'span']):
+                    text = elem.get_text()
+                    if '₹' in text:
+                        product_info['price'] = clean_price(text)
+                        break
+
+            # Extract image
+            img = container.find('img')
+            if img:
+                img_src = img.get('src') or img.get('data-src')
                 if img_src and not img_src.startswith('data:image'):
                     product_info['image_url'] = img_src
 
-            # Extract rating - NEW structure uses div.a7saXW
-            rating_elem = product.select_one('div.a7saXW, div._3LWZlK, span._1lRcqv')
-            if rating_elem:
-                rating_text = rating_elem.get_text().strip()
-                # Extract just the rating number (e.g., "4.2" from "4.21,200 Ratings&62 Reviews")
-                if rating_text and rating_text[0].isdigit():
-                    # Try to extract the numeric rating with decimal point
-                    # Match patterns like "4.2", "4.21", "42" followed by non-digit
-                    rating_match = re.match(r'(\d)\.?(\d)?', rating_text)
-                    if rating_match:
-                        if rating_match.group(2):
-                            # Has decimal part
-                            product_info['rating'] = f"{rating_match.group(1)}.{rating_match.group(2)}/5"
-                        else:
-                            # No decimal part
-                            product_info['rating'] = f"{rating_match.group(1)}/5"
-                    else:
-                        product_info['rating'] = rating_text[:20]  # Limit length
+            # Extract rating - look for patterns like "4.2", "4.5" followed by rating indicators
+            rating_pattern = re.compile(r'\b([1-5])\.([0-9])\b')
+            rating_text = container.get_text()
+            rating_match = rating_pattern.search(rating_text)
+            if rating_match:
+                rating_value = f"{rating_match.group(1)}.{rating_match.group(2)}"
+                product_info['rating'] = f"{rating_value}/5"
 
-            # Extract product URL - NEW structure uses a.k7wcnx for product link
-            link_elem = product.select_one('a.k7wcnx, a')
-            if not link_elem:
-                link_elem = product.find_parent('a')
+            # Only add products that have at least name OR price (one of them must be valid)
+            # This ensures we get results even if some data is missing
+            has_valid_name = product_info['name'] != 'Name not found' and len(product_info['name']) > 5
+            has_valid_price = product_info['price'] != 'Price not available'
 
-            if link_elem and link_elem.get('href'):
-                href = link_elem.get('href')
-                if href.startswith('/'):
-                    product_info['url'] = f"https://www.flipkart.com{href}"
-                elif href.startswith('http'):
-                    product_info['url'] = href
+            if has_valid_name or has_valid_price:
+                products.append(product_info)
 
-            products.append(product_info)
+                # Break early if we have enough products
+                if len(products) >= max_results:
+                    break
 
         except Exception as e:
+            # Log error but continue processing other products
             continue
 
     return products
@@ -396,7 +482,7 @@ Image: {product_data['image_url']}
 @mcp.tool()
 async def search_products(query: str, max_results: int = 5) -> str:
     """
-    Search for products on Flipkart and return results
+    Search for products on Flipkart and return results using robust structure-based parsing
 
     Args:
         query: Search term (e.g., "laptop", "smartphone", "shoes")
@@ -425,13 +511,18 @@ async def search_products(query: str, max_results: int = 5) -> str:
         products = extract_search_results(html_content, max_results)
 
         if not products:
+            # Return helpful debug info when no products found
             return json.dumps({
                 'message': f'No products found for query: {query}',
-                'search_url': search_url
+                'search_url': search_url,
+                'debug_info': {
+                    'html_length': len(html_content),
+                    'note': 'If HTML was fetched but no products found, Flipkart may have changed their page structure. Check server.py extract_search_results() function.'
+                }
             }, indent=2)
 
         # Format output
-        output = f"Search Results for '{query}':\n"
+        output = f"✓ Search Results for '{query}':\n"
         output += f"Found {len(products)} product(s)\n"
         output += "=" * 50 + "\n\n"
 
@@ -447,11 +538,16 @@ async def search_products(query: str, max_results: int = 5) -> str:
 
     except httpx.HTTPError as e:
         return json.dumps({
-            'error': f'Failed to perform search: {str(e)}'
+            'error': f'Failed to perform search: {str(e)}',
+            'error_type': 'HTTPError',
+            'query': query,
+            'url': search_url
         }, indent=2)
     except Exception as e:
         return json.dumps({
-            'error': f'Error searching products: {str(e)}'
+            'error': f'Error searching products: {str(e)}',
+            'error_type': type(e).__name__,
+            'query': query
         }, indent=2)
 
 
