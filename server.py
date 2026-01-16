@@ -82,7 +82,9 @@ def extract_product_data(html_content: str, url: str) -> dict:
 
     # Extract price - multiple selector fallbacks
     price_selectors = [
-        'div.Nx9bqj.CxhGGd',     # Current price
+        'div.oFEPlD',            # Current price (2025)
+        'div.QiMO5r',            # Alternative price class (2025)
+        'div.Nx9bqj.CxhGGd',     # Older price class
         'div._30jeq3',           # Alternative price class
         'div._16Jk6d',           # Another price class
         '.Nx9bqj',
@@ -122,7 +124,8 @@ def extract_product_data(html_content: str, url: str) -> dict:
 
     # Extract image URL
     image_selectors = [
-        'img._0DkuPH',           # Product image class
+        'img.UCc1lI',            # Product image class (2025)
+        'img._0DkuPH',           # Product image class (older)
         'img._2r_T1I',           # Alternative image class
         'img[class*="DByuf4"]',  # Another image class pattern
         'div._1YokD2 img',       # Image in container
@@ -140,7 +143,8 @@ def extract_product_data(html_content: str, url: str) -> dict:
 
     # Extract rating
     rating_selectors = [
-        'div._3LWZlK',           # Rating value
+        'div.MKiFS6',            # Rating value (2025)
+        'div._3LWZlK',           # Rating value (older)
         'div.XQDdHH',            # Alternative rating
         'span._1lRcqv',          # Another rating class
     ]
@@ -376,13 +380,19 @@ def extract_search_results(html_content: str, max_results: int) -> list:
                 if img_src and not img_src.startswith('data:image'):
                     product_info['image_url'] = img_src
 
-            # Extract rating - look for patterns like "4.2", "4.5" followed by rating indicators
-            rating_pattern = re.compile(r'\b([1-5])\.([0-9])\b')
-            rating_text = container.get_text()
-            rating_match = rating_pattern.search(rating_text)
-            if rating_match:
-                rating_value = f"{rating_match.group(1)}.{rating_match.group(2)}"
+            # Extract rating - try specific class first, then regex pattern
+            rating_div = container.find('div', class_='MKiFS6')
+            if rating_div:
+                rating_value = rating_div.get_text().strip()
                 product_info['rating'] = f"{rating_value}/5"
+            else:
+                # Fallback to regex pattern
+                rating_pattern = re.compile(r'\b([1-5])\.([0-9])\b')
+                rating_text = container.get_text()
+                rating_match = rating_pattern.search(rating_text)
+                if rating_match:
+                    rating_value = f"{rating_match.group(1)}.{rating_match.group(2)}"
+                    product_info['rating'] = f"{rating_value}/5"
 
             # Only add products that have at least name OR price (one of them must be valid)
             # This ensures we get results even if some data is missing
