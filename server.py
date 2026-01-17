@@ -39,7 +39,7 @@ async def fetch_flipkart_page(url: str) -> str:
         'Cache-Control': 'max-age=0',
     }
 
-    async with httpx.AsyncClient(follow_redirects=True) as client:
+    async with httpx.AsyncClient(follow_redirects=True, http2=False) as client:
         response = await client.get(url, headers=headers, timeout=15.0)
         response.raise_for_status()
         return response.text
