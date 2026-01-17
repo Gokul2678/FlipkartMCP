@@ -2,6 +2,12 @@
 """
 Flipkart Product Scraper MCP Server
 Provides tools to scrape product information and search products on Flipkart
+
+Implementation follows best practices from ScrapingDog's Flipkart scraping guide:
+- Browser-like headers with Sec-Fetch-* signals to avoid anti-bot detection
+- Multiple CSS selector fallbacks to handle Flipkart's frequent page structure changes
+- Proper rate limiting to avoid IP blocking (15s timeout, avoid frequent requests)
+- Structure-based parsing for search results (URL patterns, price symbols)
 """
 
 from mcp.server.fastmcp import FastMCP
@@ -16,14 +22,21 @@ mcp = FastMCP("Flipkart Product Scraper")
 
 
 async def fetch_flipkart_page(url: str) -> str:
-    """Helper function to fetch Flipkart product page"""
+    """
+    Helper function to fetch Flipkart product page
+    Uses browser-like headers to avoid anti-bot detection (per ScrapingDog guide)
+    """
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5',
-        'Accept-Encoding': 'gzip, deflate',
+        'Accept-Language': 'en-US,en;q=0.9',  # Updated format per ScrapingDog
+        'Accept-Encoding': 'gzip, deflate, br',  # Added Brotli support
         'Connection': 'keep-alive',
         'Upgrade-Insecure-Requests': '1',
+        'Sec-Fetch-Dest': 'document',  # Additional browser signals
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Cache-Control': 'max-age=0',
     }
 
     async with httpx.AsyncClient(follow_redirects=True) as client:
@@ -66,24 +79,31 @@ def extract_product_data(html_content: str, url: str) -> dict:
     }
 
     # Extract product name - multiple selector fallbacks
-    name_selectors = [
-        'span.VU-ZEz',           # Common product title class
-        'span.B_NuCI',           # Alternative title class
-        'h1.yhB1nd',             # H1 title
-        'h1 span',               # Generic H1 span
-        '.B_NuCI',
-    ]
+    # Strategy 1: Try h1 tag first (most reliable per ScrapingDog guide)
+    h1_elem = soup.find('h1')
+    if h1_elem:
+        product_data['name'] = h1_elem.get_text().strip()
+    else:
+        # Strategy 2: Fallback to specific class selectors
+        name_selectors = [
+            'span.VU-ZEz',           # Common product title class
+            'span.B_NuCI',           # Alternative title class
+            'h1.yhB1nd',             # H1 title with class
+            'h1 span',               # Generic H1 span
+            '.B_NuCI',
+        ]
 
-    for selector in name_selectors:
-        name_elem = soup.select_one(selector)
-        if name_elem:
-            product_data['name'] = name_elem.get_text().strip()
-            break
+        for selector in name_selectors:
+            name_elem = soup.select_one(selector)
+            if name_elem:
+                product_data['name'] = name_elem.get_text().strip()
+                break
 
     # Extract price - multiple selector fallbacks
     price_selectors = [
         'div.oFEPlD',            # Current price (2025)
         'div.QiMO5r',            # Alternative price class (2025)
+        'div._30jeq3._16Jk6d',   # ScrapingDog recommended selector
         'div.Nx9bqj.CxhGGd',     # Older price class
         'div._30jeq3',           # Alternative price class
         'div._16Jk6d',           # Another price class
@@ -123,23 +143,43 @@ def extract_product_data(html_content: str, url: str) -> dict:
                 break
 
     # Extract image URL
-    image_selectors = [
-        'img.UCc1lI',            # Product image class (2025)
-        'img._0DkuPH',           # Product image class (older)
-        'img._2r_T1I',           # Alternative image class
-        'img[class*="DByuf4"]',  # Another image class pattern
-        'div._1YokD2 img',       # Image in container
-        'img[alt]',              # Any image with alt text
-    ]
+    # Try to get multiple images first
+    images = []
 
-    for selector in image_selectors:
-        img_elem = soup.select_one(selector)
-        if img_elem and img_elem.get('src'):
-            img_src = img_elem.get('src')
-            # Prefer higher quality images
+    # ScrapingDog recommended selector for image gallery
+    li_elements = soup.find_all('li', class_=['_20Gt85', '_1Y_A6W'])
+    for li_element in li_elements:
+        img = li_element.find('img')
+        if img and img.get('src'):
+            img_src = img.get('src')
             if img_src and not img_src.endswith('.gif'):
-                product_data['image_url'] = img_src
-                break
+                images.append(img_src)
+
+    # If no gallery images found, try single image selectors
+    if not images:
+        image_selectors = [
+            'img.UCc1lI',            # Product image class (2025)
+            'img._0DkuPH',           # Product image class (older)
+            'img._2r_T1I',           # Alternative image class
+            'img[class*="DByuf4"]',  # Another image class pattern
+            'div._1YokD2 img',       # Image in container
+            'img[alt]',              # Any image with alt text
+        ]
+
+        for selector in image_selectors:
+            img_elem = soup.select_one(selector)
+            if img_elem and img_elem.get('src'):
+                img_src = img_elem.get('src')
+                # Prefer higher quality images
+                if img_src and not img_src.endswith('.gif'):
+                    images.append(img_src)
+                    break
+
+    # Set the first image as primary
+    if images:
+        product_data['image_url'] = images[0]
+        # Optionally store all images (currently we only return first one)
+        # product_data['all_images'] = images
 
     # Extract rating
     rating_selectors = [
@@ -191,6 +231,7 @@ def extract_product_data(html_content: str, url: str) -> dict:
 
     # Extract product highlights
     highlights_selectors = [
+        'ul li._21Ahn-',         # ScrapingDog recommended selector
         'ul._1_Bfqy li',         # Highlights list
         'div._2418kt li',        # Alternative highlights
     ]
@@ -214,6 +255,7 @@ def extract_product_data(html_content: str, url: str) -> dict:
 
     # Extract description
     description_selectors = [
+        'div._1mXcCf.RmoJUa',    # ScrapingDog recommended selector
         'div._1mXcCf',           # Description container
         'div.qnrGsz',            # Alternative description
         'p._2o5hS8',             # Description paragraph
@@ -330,32 +372,62 @@ def extract_search_results(html_content: str, max_results: int) -> list:
             # Extract product name - multiple strategies
             name_found = False
 
-            # Strategy 1: Try finding name in link text or child divs/spans
-            for elem in [link] + link.find_all(['div', 'span', 'a'], recursive=False)[:5]:
-                name_text = elem.get_text(strip=True)
-                if name_text and len(name_text) > 5 and len(name_text) < 250:
-                    # Clean up the name
-                    name_text = name_text.replace('Add to Compare', '').strip()
-                    name_text = re.sub(r'\s+', ' ', name_text)  # Normalize whitespace
-                    # Avoid price-like text
-                    if '₹' not in name_text and not name_text.replace('.', '').replace(',', '').isdigit():
+            # Strategy 1: Look for specific Flipkart product name classes (most reliable)
+            name_class_selectors = [
+                'RG5Slk',    # Primary product name (2025)
+                'KzDlHZ',    # Alternative product name
+                'IRpwTa',    # Another product name class
+                's1Q9rs',    # Older product name class
+                'WKTcLC',    # Fallback product name
+            ]
+
+            for class_name in name_class_selectors:
+                name_elem = container.find(class_=class_name)
+                if name_elem:
+                    name_text = name_elem.get_text(strip=True)
+                    if name_text and len(name_text) > 10:
+                        # Clean up the name
+                        name_text = name_text.replace('Add to Compare', '').strip()
+                        name_text = re.sub(r'\s+', ' ', name_text)
                         product_info['name'] = name_text[:200]
                         name_found = True
                         break
 
-            # Strategy 2: Look in container if link text was too short
+            # Strategy 2: Try finding name in link text or child divs/spans
+            if not name_found:
+                for elem in [link] + link.find_all(['div', 'span', 'a'], recursive=False)[:5]:
+                    name_text = elem.get_text(strip=True)
+                    if name_text and len(name_text) > 5 and len(name_text) < 250:
+                        # Clean up the name
+                        name_text = name_text.replace('Add to Compare', '').strip()
+                        name_text = re.sub(r'\s+', ' ', name_text)  # Normalize whitespace
+                        # Avoid price-like text and specifications
+                        if ('₹' not in name_text and
+                            not name_text.replace('.', '').replace(',', '').isdigit() and
+                            'Processor' not in name_text and  # Avoid specs
+                            'RAM' not in name_text):
+                            product_info['name'] = name_text[:200]
+                            name_found = True
+                            break
+
+            # Strategy 3: Look in container if previous strategies failed
             if not name_found or len(product_info['name']) < 10:
                 # Find all text elements in container, prioritize longer ones
                 text_candidates = []
                 for elem in container.find_all(['div', 'span', 'a']):
                     text = elem.get_text(strip=True)
-                    if (10 < len(text) < 250 and
+                    if (20 < len(text) < 250 and
                         '₹' not in text and
                         not text.replace('.', '').replace(',', '').isdigit() and
-                        'Add to Compare' not in text):
+                        'Add to Compare' not in text and
+                        'Processor' not in text and  # Avoid specs
+                        'RAM' not in text and
+                        'Operating System' not in text):
                         text_candidates.append(text)
 
-                # Sort by length (longer product names are usually more complete)
+                # Sort by length (product names are usually medium length, not too long)
+                # Filter out very long text that's likely descriptions/specs
+                text_candidates = [t for t in text_candidates if len(t) < 150]
                 text_candidates.sort(key=len, reverse=True)
                 if text_candidates:
                     product_info['name'] = text_candidates[0][:200]

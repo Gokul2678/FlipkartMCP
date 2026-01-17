@@ -114,11 +114,41 @@ The server is configured in `.opencode/opencode.jsonc`:
 
 ## Implementation Notes
 
-- Uses multiple CSS selector fallbacks for robustness
-- Cleans and formats price data
-- Handles edge cases (missing data, parsing errors)
-- Async implementation for better performance
-- 15-second timeout for HTTP requests
+### Robust Scraping Strategy
+
+The implementation follows best practices from [ScrapingDog's Flipkart scraping guide](https://www.scrapingdog.com/blog/scrape-flipkart/):
+
+**1. Anti-Bot Protection**
+- Browser-like headers with `Sec-Fetch-*` signals
+- Proper `Accept-Language` and `Accept-Encoding` (including Brotli)
+- Chrome User-Agent mimicry
+- 15-second timeout to avoid triggering rate limits
+
+**2. CSS Selector Strategy**
+- Multiple fallback selectors for each data field (5-7 per field)
+- Prioritizes semantic HTML (`<h1>` for titles) over class-based selectors
+- Structure-based parsing for search results (URL patterns, price symbols)
+- Resilient to Flipkart's frequent page structure updates
+
+**3. Product Page Selectors**
+- **Name**: `<h1>` tag → class-based fallbacks
+- **Price**: `._30jeq3._16Jk6d` → multiple alternatives
+- **Highlights**: `ul li._21Ahn-` → generic list selectors
+- **Description**: `._1mXcCf.RmoJUa` → single class fallback
+- **Images**: Gallery (`li._20Gt85`, `li._1Y_A6W`) → single image fallbacks
+
+**4. Search Results Optimization**
+- Uses URL pattern matching (`/p/itm`, `/p/products`) for product links
+- Finds product containers via price symbol (`₹`) proximity
+- Extracts names from `RG5Slk` class (2025 structure) with fallbacks
+- Filters out specifications text (RAM, Processor, etc.)
+- De-duplicates results by URL
+
+**5. Error Handling**
+- Graceful degradation (returns partial data if some fields missing)
+- Descriptive JSON error responses
+- HTTP error catching with context
+- Timeout protection
 
 ## Comparison with Amazon MCP
 
